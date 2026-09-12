@@ -1,5 +1,14 @@
 namespace WebApplication1.Models;
 
-public sealed record User(Guid Id, string Email, string DisplayName, string PasswordHash, int? BestGuesses);
-public sealed record GameState(int Attempts, bool Active);
-public sealed record GuessResult(string Direction, int Attempts, int? BestGuesses, bool NewBest);
+public class User
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Email { get; set; } = "";
+    public string PasswordHash { get; set; } = "";
+    public int? BestGuesses { get; set; }
+    public int? SecretNumber { get; set; }
+    public int GuessCount { get; set; }
+
+    // PostgreSQL's xmin changes on every update; EF uses it to detect overlapping requests.
+    public uint Version { get; set; }
+}

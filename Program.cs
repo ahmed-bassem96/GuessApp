@@ -1,80 +1,108 @@
-
-using System.Security.Claims;
-using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Identity;
-using Npgsql;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
 using WebApplication1.Data;
 using WebApplication1.Models;
 
 var builder = WebApplication.CreateBuilder(args);
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("Set ConnectionStrings__DefaultConnection to a PostgreSQL connection string. See README.md.");
-builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
-builder.Services.AddScoped<AppStore>();
+
+builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(
+    builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("Configure ConnectionStrings__DefaultConnection. See README.md.")));
 builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
-builder.Services.AddControllers();
+// Includes MVC's built-in CSRF filters. Endpoints are API controllers; there are no views.
+builder.Services.AddControllersWithViews(options =>
+    options.Filters.Add(new AutoValidateAntiforgeryTokenAttribute()));
 builder.Services.AddProblemDetails();
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
+builder.Services.AddSwaggerGen(options =>
 {
-    options.Cookie.Name = "guess43.auth";
-    options.Cookie.HttpOnly = true;
-    options.Cookie.SameSite = SameSiteMode.Strict;
-    options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
-        ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
-    options.ExpireTimeSpan = TimeSpan.FromHours(8);
-    options.SlidingExpiration = false;
-    options.Events.OnRedirectToLogin = context => { context.Response.StatusCode = 401; return Task.CompletedTask; };
-    options.Events.OnRedirectToAccessDenied = context => { context.Response.StatusCode = 403; return Task.CompletedTask; };
-    options.Events.OnValidatePrincipal = async context =>
+    options.SwaggerDoc("v1", new()
     {
-        var id = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!Guid.TryParse(id, out var userId) || await context.HttpContext.RequestServices
-                .GetRequiredService<AppStore>().GetUser(userId) is null)
-            context.RejectPrincipal();
-    };
+        Title = "Guess the Number API",
+        Version = "v1",
+        Description = "Use Try it out, edit the request body, then Execute. Register or log in first, " +
+            "then start a game and submit guesses. Swagger automatically sends the authentication cookie and CSRF token."
+    });
+    options.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, "WebApplication1.xml"));
+    options.AddSecurityDefinition("CsrfToken", new OpenApiSecurityScheme
+    {
+        Type = SecuritySchemeType.ApiKey,
+        In = ParameterLocation.Header,
+        Name = "X-CSRF-TOKEN",
+        Description = "Paste the token from GET /api/auth/csrf. It is sent on all endpoints. " +
+            "Refresh it after registration, login, or logout. This is a CSRF token, not a login token; " +
+            "authentication uses the browser cookie. Leave empty to let Swagger obtain CSRF tokens automatically."
+    });
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        [new OpenApiSecurityScheme
+        {
+            Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "CsrfToken" }
+        }] = Array.Empty<string>()
+    });
 });
+builder.Services.AddAntiforgery(options => options.HeaderName = "X-CSRF-TOKEN");
+builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
+    .WithOrigins(builder.Configuration["FrontendOrigin"] ?? "http://localhost:5173")
+    .AllowAnyHeader().AllowAnyMethod().AllowCredentials()));
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "guess43.auth";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+            ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
+        options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        options.SlidingExpiration = false;
+        // APIs return status codes, not redirects to an HTML login page.
+        options.Events.OnRedirectToLogin = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        };
+        options.Events.OnRedirectToAccessDenied = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return Task.CompletedTask;
+        };
+    });
 builder.Services.AddAuthorization();
-builder.Services.AddRateLimiter(options =>
-{
-    options.RejectionStatusCode = 429;
-    options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
-        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-        _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
-});
 
 var app = builder.Build();
 app.UseExceptionHandler();
-app.Use(async (context, next) =>
+if (app.Environment.IsDevelopment())
 {
-    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
-    context.Response.Headers["X-Frame-Options"] = "DENY";
-    context.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
-    context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
-    if (context.Request.Path.StartsWithSegments("/api"))
+    app.UseSwagger();
+    app.UseSwaggerUI(options =>
     {
-        context.Response.Headers.CacheControl = "no-store";
-        // A custom header plus no CORS prevents cross-site form submissions and credentialed fetches.
-        if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method)
-            && context.Request.Headers["X-Requested-With"] != "Guess43")
-        {
-            context.Response.StatusCode = 400;
-            await context.Response.WriteAsJsonAsync(new { message = "Missing request verification header." });
-            return;
-        }
-    }
-    await next();
-});
-app.UseDefaultFiles();
-app.UseStaticFiles();
-app.UseRouting();
-app.UseRateLimiter();
+        options.SwaggerEndpoint("v1/swagger.json", "Guess the Number API v1");
+        // Respect Authorize's shared token; obtain one automatically when none is entered.
+        options.UseRequestInterceptor("""
+            function (request) {
+                request.credentials = 'same-origin';
+                request.headers = request.headers || {};
+                if (request.headers['X-CSRF-TOKEN']) return request;
+                if (!['GET', 'HEAD', 'OPTIONS'].includes((request.method || 'GET').toUpperCase())) {
+                    return fetch('../api/auth/csrf', { credentials: 'same-origin' })
+                        .then(function (response) {
+                            if (!response.ok) throw new Error('Could not get the CSRF token. Refresh Swagger and try again.');
+                            return response.json();
+                        })
+                        .then(function (data) {
+                            request.headers['X-CSRF-TOKEN'] = data.token;
+                            return request;
+                        });
+                }
+                return request;
+            }
+            """.ReplaceLineEndings(" ")); // Swagger 6 embeds this in a JavaScript JSON string.
+    });
+}
+app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
-app.MapFallback("/api/{**path}", () => Results.NotFound());
-app.MapFallbackToFile("index.html");
-await using (var scope = app.Services.CreateAsyncScope())
-    await scope.ServiceProvider.GetRequiredService<AppStore>().Initialize();
 app.Run();

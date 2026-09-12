@@ -1,10 +1,11 @@
 using System.Security.Claims;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using WebApplication1.Data;
 using WebApplication1.DTOs;
@@ -12,65 +13,95 @@ using WebApplication1.Models;
 
 namespace WebApplication1.Controllers;
 
-[ApiController, Route("api/auth")]
-public sealed class AuthController(AppStore store, IPasswordHasher<User> hasher) : ControllerBase
+[ApiController]
+[Route("api/auth")]
+[ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+public class AuthController(AppDbContext db, IPasswordHasher<User> passwordHasher) : ControllerBase
 {
-    [HttpPost("register"), EnableRateLimiting("auth")]
-    public async Task<IActionResult> Register(RegisterRequest request)
+    /// <summary>Get a CSRF token for write requests.</summary>
+    /// <remarks>Swagger does this automatically. React must send the token in X-CSRF-TOKEN and refresh it after login/logout.</remarks>
+    [HttpGet("csrf")]
+    public IActionResult Csrf([FromServices] IAntiforgery antiforgery)
     {
-        var user = new User(Guid.NewGuid(), request.Email.Trim().ToLowerInvariant(), request.DisplayName.Trim(), "", null);
-        user = user with { PasswordHash = hasher.HashPassword(user, request.Password) };
-        try { await store.Create(user); }
-        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
-        { return Conflict(new { message = "An account with this email already exists." }); }
-        await SignIn(user);
-        return StatusCode(201, PublicUser(user));
+        var tokens = antiforgery.GetAndStoreTokens(HttpContext);
+        return Ok(new { token = tokens.RequestToken });
     }
 
-    [HttpPost("login"), EnableRateLimiting("auth")]
-    public async Task<IActionResult> Login(LoginRequest request)
+    /// <summary>Register a user and sign in.</summary>
+    /// <remarks>Use a valid email and an 8–128 character password. Returns the user and sets an HttpOnly login cookie.</remarks>
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [HttpPost("register")]
+    public async Task<ActionResult<UserResponse>> Register(RegisterRequest request)
     {
-        var user = await store.FindByEmail(request.Email.Trim().ToLowerInvariant());
-        if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)
+        var user = new User { Email = request.Email.Trim().ToLowerInvariant() };
+        user.PasswordHash = passwordHasher.HashPassword(user, request.Password);
+        db.Users.Add(user);
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException
+               { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            return Conflict(new { message = "An account with this email already exists." });
+        }
+
+        await SignIn(user);
+        return CreatedAtAction(nameof(Me), new UserResponse(user.Id, user.Email, user.BestGuesses));
+    }
+
+    /// <summary>Sign in and retrieve your saved personal best.</summary>
+    /// <remarks>Sets the authentication cookie. A null bestGuesses means no completed game yet.</remarks>
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [HttpPost("login")]
+    public async Task<ActionResult<UserResponse>> Login(LoginRequest request)
+    {
+        var email = request.Email.Trim().ToLowerInvariant();
+        var user = await db.Users.SingleOrDefaultAsync(u => u.Email == email);
+        if (user is null || passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password)
+            == PasswordVerificationResult.Failed)
             return Unauthorized(new { message = "Email or password is incorrect." });
+
         await SignIn(user);
-        return Ok(PublicUser(user));
+        return Ok(new UserResponse(user.Id, user.Email, user.BestGuesses));
     }
 
+    /// <summary>Sign out by clearing the browser's login cookie.</summary>
+    /// <remarks>Requires login. Does not delete the user or their personal best.</remarks>
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [HttpPost("logout")]
     public async Task<IActionResult> Logout()
     {
-        await HttpContext.SignOutAsync();
+        await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         return NoContent();
     }
 
-    [HttpGet("me"), Authorize]
-    public async Task<IActionResult> Me()
+    /// <summary>Read the authenticated user and their personal best.</summary>
+    [Authorize]
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [HttpGet("me")]
+    public async Task<ActionResult<UserResponse>> Me()
     {
-        var user = await store.GetUser(UserId);
-        return user is null ? Unauthorized() : Ok(PublicUser(user));
+        var userId = Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+        var user = await db.Users.AsNoTracking().SingleOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Unauthorized();
+        return Ok(new UserResponse(user.Id, user.Email, user.BestGuesses));
     }
 
-    [HttpPut("me"), Authorize]
-    public async Task<IActionResult> Update(ProfileRequest request)
+    private Task SignIn(User user)
     {
-        await store.UpdateName(UserId, request.DisplayName.Trim());
-        return Ok(PublicUser((await store.GetUser(UserId))!));
+        var identity = new ClaimsIdentity(
+            [new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())],
+            CookieAuthenticationDefaults.AuthenticationScheme);
+        return HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
+            new ClaimsPrincipal(identity));
     }
-
-    [HttpDelete("me"), Authorize, EnableRateLimiting("auth")]
-    public async Task<IActionResult> Delete(DeleteAccountRequest request)
-    {
-        var user = await store.GetUser(UserId);
-        if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)
-            return Unauthorized(new { message = "Password is incorrect." });
-        await store.Delete(UserId);
-        await HttpContext.SignOutAsync();
-        return NoContent();
-    }
-
-    private Guid UserId => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-    private static object PublicUser(User user) => new { user.Id, user.Email, user.DisplayName, user.BestGuesses };
-    private Task SignIn(User user) => HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
-        new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())], CookieAuthenticationDefaults.AuthenticationScheme)));
 }

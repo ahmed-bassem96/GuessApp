@@ -1,6 +1,47 @@
-@WebApplication1_HostAddress = http://localhost:5139
+@baseUrl = http://localhost:5139/api
+@csrfToken = paste-token-from-csrf-response
 
-GET {{WebApplication1_HostAddress}}/weatherforecast/
-Accept: application/json
+# Use an HTTP client with a cookie jar enabled. Fetch CSRF first, copy the token
+# above, and retain all response cookies. Refresh the token after login/logout.
+GET {{baseUrl}}/auth/csrf
 
-###
+### Register (also logs in)
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{
+  "email": "player@example.com",
+  "password": "Interview-Password-123!"
+}
+
+### Login
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{
+  "email": "player@example.com",
+  "password": "Interview-Password-123!"
+}
+
+### Current user, including personal best
+GET {{baseUrl}}/auth/me
+
+### Start a new round
+POST {{baseUrl}}/games
+X-CSRF-TOKEN: {{csrfToken}}
+
+### Current game (never contains the secret)
+GET {{baseUrl}}/games/current
+
+### Submit a guess
+POST {{baseUrl}}/games/current/guesses
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{ "number": 22 }
+
+### Logout
+POST {{baseUrl}}/auth/logout
+X-CSRF-TOKEN: {{csrfToken}}
