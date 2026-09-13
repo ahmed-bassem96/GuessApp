@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>WebApplication1</name>
+    </assembly>
+    <members>
+        <member name="M:WebApplication1.Controllers.AuthController.Csrf(Microsoft.AspNetCore.Antiforgery.IAntiforgery)">
+            <summary>Get a CSRF token for write requests.</summary>
+            <remarks>Swagger does this automatically. React must send the token in X-CSRF-TOKEN and refresh it after login/logout.</remarks>
+        </member>
+        <member name="M:WebApplication1.Controllers.AuthController.Register(WebApplication1.DTOs.RegisterRequest)">
+            <summary>Register a user and sign in.</summary>
+            <remarks>Use a valid email and an 8–128 character password. Returns the user and sets an HttpOnly login cookie.</remarks>
+        </member>
+        <member name="M:WebApplication1.Controllers.AuthController.Login(WebApplication1.DTOs.LoginRequest)">
+            <summary>Sign in and retrieve your saved personal best.</summary>
+            <remarks>Sets the authentication cookie. A null bestGuesses means no completed game yet.</remarks>
+        </member>
+        <member name="M:WebApplication1.Controllers.AuthController.Logout">
+            <summary>Sign out by clearing the browser's login cookie.</summary>
+            <remarks>Requires login. Does not delete the user or their personal best.</remarks>
+        </member>
+        <member name="M:WebApplication1.Controllers.AuthController.Me">
+            <summary>Read the authenticated user and their personal best.</summary>
+        </member>
+        <member name="M:WebApplication1.Controllers.GameController.Current">
+            <summary>Read whether a game is active and its current guess count.</summary>
+            <remarks>Requires login. The secret number is never included in responses.</remarks>
+        </member>
+        <member name="M:WebApplication1.Controllers.GameController.Start">
+            <summary>Start a new game with a secret number from 1 through 43.</summary>
+            <remarks>Requires login. Replaces any unfinished round and resets the count to zero. No request body is needed.</remarks>
+        </member>
+        <member name="M:WebApplication1.Controllers.GameController.Guess(WebApplication1.DTOs.GuessRequest)">
+            <summary>Submit a guess and receive guess higher, guess lower, or correct.</summary>
+            <remarks>Requires login and an active game. Send an integer from 1 through 43. Valid guesses count automatically; a winning score updates the personal best only if it improves it. A 409 means no active game or a concurrent update; refresh the current game.</remarks>
+        </member>
+        <member name="T:WebApplication1.Migrations.InitialCreate">
+            <inheritdoc />
+        </member>
+        <member name="M:WebApplication1.Migrations.InitialCreate.Up(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:WebApplication1.Migrations.InitialCreate.Down(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:WebApplication1.Migrations.InitialCreate.BuildTargetModel(Microsoft.EntityFrameworkCore.ModelBuilder)">
+            <inheritdoc />
+        </member>
+    </members>
+</doc>
